@@ -1,391 +1,280 @@
 TradeAnalyzer/
-
 ├── app.py
-
+├── requirements.txt
 ├── templates/
-
-│   └── index.html
-
+│   ├── base.html
+│   ├── index.html
+│   ├── login.html
+│   ├── register.html
+│   └── dashboard.html
 ├── static/
-
 │   ├── css/
-
 │   │   └── styles.css
-
 │   ├── js/
-
 │   │   └── scripts.js
-
-
-
-app.py
-
-from flask import Flask, render_template
-
+from flask import Flask, render_template, redirect, url_for, request, session, flash
 from flask_socketio import SocketIO, emit
-
+from flask_sqlalchemy import SQLAlchemy
+from werkzeug.security import generate_password_hash, check_password_hash
 import requests
-
 import time
-
 from threading import Thread
 
-
-
 app = Flask(__name__)
-
-app.config['SECRET_KEY'] = 'secret!'
-
+app.config['SECRET_KEY'] = 'your_secret_key'
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///trade_analyzer.db'
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+db = SQLAlchemy(app)
 socketio = SocketIO(app)
 
+# Replace with your actual Alpha Vantage API Key
+ALPHA_VANTAGE_API_KEY = "demo"
 
+# Database models
+class User(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(150), unique=True, nullable=False)
+    email = db.Column(db.String(150), unique=True, nullable=False)
+    password = db.Column(db.String(200), nullable=False)
 
-# Simulated trader profiles and API integration
+class Trader(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    name = db.Column(db.String(100), nullable=False)
+    symbol = db.Column(db.String(10), nullable=False)
 
-TRADERS = [
+# Initialize database
+with app.app_context():
+    db.create_all()
 
-    {"id": 1, "name": "John Doe", "symbol": "AAPL"},
-
-    {"id": 2, "name": "Jane Smith", "symbol": "TSLA"},
-
-]
-
-
-
-# Fetch real-time stock data (use any trading API)
-
+# Fetch stock data
 def fetch_stock_data(symbol):
-
-    # Example API integration (replace with your API key)
-
-    url = f"https://www.alphavantage.co/query?function=TIME_SERIES_INTRADAY&symbol={symbol}&interval=1min&apikey=YOUR_API_KEY"
-
+    url = f"https://www.alphavantage.co/query?function=TIME_SERIES_INTRADAY&symbol={symbol}&interval=1min&apikey={ALPHA_VANTAGE_API_KEY}"
     response = requests.get(url).json()
-
     try:
-
-        # Parse data for the latest price
-
         latest_data = list(response["Time Series (1min)"].values())[0]
-
-        return {"price": float(latest_data["1. open"]), "volume": int(latest_data["5. volume"])}
-
+        return {
+            "price": float(latest_data["1. open"]),
+            "volume": int(latest_data["5. volume"]),
+        }
     except (KeyError, IndexError):
-
         return {"price": 0, "volume": 0}
 
-
-
-# Background task to broadcast data every second
-
+# Background task
 def background_task():
-
     while True:
-
         updates = []
-
-        for trader in TRADERS:
-
-            data = fetch_stock_data(trader["symbol"])
-
+        traders = Trader.query.all()
+        for trader in traders:
+            data = fetch_stock_data(trader.symbol)
             updates.append({
-
-                "name": trader["name"],
-
-                "symbol": trader["symbol"],
-
+                "name": trader.name,
+                "symbol": trader.symbol,
                 "price": data["price"],
-
                 "volume": data["volume"],
-
             })
-
-        # Emit data to the front-end
-
         socketio.emit("update_data", {"traders": updates})
-
         time.sleep(1)
 
-
-
 @app.route("/")
-
 def index():
+    return render_template("index.html")
 
-    return render_template("index.html", traders=TRADERS)
+@app.route("/register", methods=["GET", "POST"])
+def register():
+    if request.method == "POST":
+        username = request.form["username"]
+        email = request.form["email"]
+        password = generate_password_hash(request.form["password"], method='sha256')
+        if User.query.filter_by(email=email).first():
+            flash("Email already exists!", "error")
+        else:
+            new_user = User(username=username, email=email, password=password)
+            db.session.add(new_user)
+            db.session.commit()
+            flash("Registration successful! Please log in.", "success")
+            return redirect(url_for("login"))
+    return render_template("register.html")
 
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        email = request.form["email"]
+        password = request.form["password"]
+        user = User.query.filter_by(email=email).first()
+        if user and check_password_hash(user.password, password):
+            session["user_id"] = user.id
+            session["username"] = user.username
+            flash("Logged in successfully!", "success")
+            return redirect(url_for("dashboard"))
+        flash("Invalid email or password", "error")
+    return render_template("login.html")
 
+@app.route("/dashboard", methods=["GET", "POST"])
+def dashboard():
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+    user_id = session["user_id"]
+    traders = Trader.query.filter_by(user_id=user_id).all()
+    if request.method == "POST":
+        name = request.form["name"]
+        symbol = request.form["symbol"]
+        new_trader = Trader(user_id=user_id, name=name, symbol=symbol)
+        db.session.add(new_trader)
+        db.session.commit()
+        flash("Trader added successfully!", "success")
+    return render_template("dashboard.html", traders=traders)
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    flash("Logged out successfully!", "success")
+    return redirect(url_for("index"))
 
 if __name__ == "__main__":
-
-    # Start background task in a separate thread
-
     socketio.start_background_task(target=background_task)
-
     socketio.run(app, debug=True)
-
-
-
-Frontend: templates/index.html
-
-
-
-#This is the front-end HTML file with live updates powered by Socket.IO.
-
-
-
+Flask==2.3.2
+Flask-SocketIO==5.3.2
+Flask-SQLAlchemy==3.0.5
+requests==2.31.0
+Werkzeug==2.3.2
 <!DOCTYPE html>
-
 <html lang="en">
-
 <head>
-
-  <meta charset="UTF-8">
-
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-
-  <title>TradeAnalyzer</title>
-
-  <link rel="stylesheet" href="/static/css/styles.css">
-
-  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.5.3/socket.io.js"></script>
-
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TradeAnalyzer</title>
+    <link rel="stylesheet" href="/static/css/styles.css">
 </head>
-
 <body>
-
-  <header>
-
-    <h1>TradeAnalyzer: Real-Time Trading Patterns</h1>
-
-  </header>
-
-  <main>
-
-    <section>
-
-      <h2>Trader Profiles</h2>
-
-      <div id="trader-data">
-
-        <!-- Dynamic trader cards -->
-
-      </div>
-
-    </section>
-
-    <section>
-
-      <h2>Live Price Chart</h2>
-
-      <canvas id="priceChart"></canvas>
-
-    </section>
-
-  </main>
-
-  <footer>
-
-    <p>&copy; 2025 TradeAnalyzer. All rights reserved.</p>
-
-  </footer>
-
-  <script src="/static/js/scripts.js"></script>
-
+    <header>
+        <h1>TradeAnalyzer</h1>
+        <nav>
+            <a href="/">Home</a>
+            {% if session.get("user_id") %}
+                <a href="/dashboard">Dashboard</a>
+                <a href="/logout">Logout</a>
+            {% else %}
+                <a href="/login">Login</a>
+                <a href="/register">Register</a>
+            {% endif %}
+        </nav>
+    </header>
+    <main>
+        {% with messages = get_flashed_messages(with_categories=True) %}
+            {% if messages %}
+                <ul>
+                {% for category, message in messages %}
+                    <li class="{{ category }}">{{ message }}</li>
+                {% endfor %}
+                </ul>
+            {% endif %}
+        {% endwith %}
+        {% block content %}{% endblock %}
+    </main>
+    <footer>
+        <p>&copy; 2025 TradeAnalyzer. All rights reserved.</p>
+    </footer>
 </body>
-
 </html>
+{% extends "base.html" %}
 
+{% block content %}
+    <h2>Welcome to TradeAnalyzer!</h2>
+    <p>Monitor your trading data in real-time.</p>
+{% endblock %}
+{% extends "base.html" %}
 
+{% block content %}
+    <h2>Login</h2>
+    <form action="/login" method="POST">
+        <label for="email">Email:</label>
+        <input type="email" id="email" name="email" required>
+        <label for="password">Password:</label>
+        <input type="password" id="password" name="password" required>
+        <button type="submit">Login</button>
+    </form>
+{% endblock %}
+{% extends "base.html" %}
 
-CSS: static/css/styles.css
+{% block content %}
+    <h2>Register</h2>
+    <form action="/register" method="POST">
+        <label for="username">Username:</label>
+        <input type="text" id="username" name="username" required>
+        <label for="email">Email:</label>
+        <input type="email" id="email" name="email" required>
+        <label for="password">Password:</label>
+        <input type="password" id="password" name="password" required>
+        <button type="submit">Register</button>
+    </form>
+{% endblock %}
+{% extends "base.html" %}
 
+{% block content %}
+    <h2>Register</h2>
+    <form action="/register" method="POST">
+        <label for="username">Username:</label>
+        <input type="text" id="username" name="username" required>
+        <label for="email">Email:</label>
+        <input type="email" id="email" name="email" required>
+        <label for="password">Password:</label>
+        <input type="password" id="password" name="password" required>
+        <button type="submit">Register</button>
+    </form>
+{% endblock %}
+{% extends "base.html" %}
 
+{% block content %}
+    <h2>Your Dashboard</h2>
+    <form action="/dashboard" method="POST">
+        <label for="name">Trader Name:</label>
+        <input type="text" id="name" name="name" required>
+        <label for="symbol">Stock Symbol:</label>
+        <input type="text" id="symbol" name="symbol" required>
+        <button type="submit">Add Trader</button>
+    </form>
 
+    <h3>Your Traders</h3>
+    <ul>
+        {% for trader in traders %}
+            <li>{{ trader.name }} ({{ trader.symbol }})</li>
+        {% endfor %}
+    </ul>
+{% endblock %}
 body {
-
-  font-family: Arial, sans-serif;
-
-  line-height: 1.6;
-
-  margin: 0;
-
-  padding: 0;
-
+    font-family: Arial, sans-serif;
+    line-height: 1.6;
+    margin: 0;
+    padding: 0;
 }
-
-
 
 header {
-
-  background: #4caf50;
-
-  color: white;
-
-  text-align: center;
-
-  padding: 1rem;
-
+    background: #4caf50;
+    color: white;
+    text-align: center;
+    padding: 1rem;
 }
 
-
+nav a {
+    margin: 0 1rem;
+    color: white;
+    text-decoration: none;
+}
 
 main {
-
-  padding: 2rem;
-
+    padding: 2rem;
 }
 
-
-
-#trader-data {
-
-  display: flex;
-
-  gap: 2rem;
-
-  flex-wrap: wrap;
-
+footer {
+    text-align: center;
+    padding: 1rem;
+    background: #4caf50;
+    color: white;
 }
-
-
-
-.trader-card {
-
-  background: #f4f4f4;
-
-  padding: 1rem;
-
-  border: 1px solid #ddd;
-
-  border-radius: 5px;
-
-}
-
-
-
-canvas {
-
-  max-width: 100%;
-
-}
-
-
-
-JavaScript: static/js/scripts.js
-
-
-
 const socket = io.connect(window.location.origin);
 
-
-
-// Dynamic trader cards
-
-const traderDataDiv = document.getElementById("trader-data");
-
-
-
-// Chart setup
-
-const ctx = document.getElementById("priceChart").getContext("2d");
-
-const priceChart = new Chart(ctx, {
-
-  type: "line",
-
-  data: {
-
-    labels: [],
-
-    datasets: [],
-
-  },
-
-  options: {
-
-    responsive: true,
-
-    plugins: {
-
-      legend: { position: "top" },
-
-    },
-
-  },
-
-});
-
-
-
-// Handle updates from the server
-
 socket.on("update_data", (data) => {
-
-  traderDataDiv.innerHTML = ""; // Clear existing cards
-
-  const labels = [];
-
-  const datasets = [];
-
-
-
-  data.traders.forEach((trader) => {
-
-    // Update trader cards
-
-    const card = document.createElement("div");
-
-    card.className = "trader-card";
-
-    card.innerHTML = `
-
-      <h3>${trader.name} (${trader.symbol})</h3>
-
-      <p>Price: $${trader.price.toFixed(2)}</p>
-
-      <p>Volume: ${trader.volume}</p>
-
-    `;
-
-    traderDataDiv.appendChild(card);
-
-
-
-    // Update chart data
-
-    labels.push(trader.symbol);
-
-    datasets.push({
-
-      label: trader.name,
-
-      data: [trader.price],
-
-      borderColor: "#" + Math.floor(Math.random() * 16777215).toString(16),
-
-      fill: false,
-
-    });
-
-  });
-
-
-
-  // Refresh chart
-
-  priceChart.data.labels = labels;
-
-  priceChart.data.datasets = datasets;
-
-  priceChart.update();
-
+    console.log(data);
 });
-
-
-
-pip install flask flask-socketio requests
-
-python app.py
